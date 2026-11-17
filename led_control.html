@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>ESP32 LED</title>
+<style>
+  :root { --yellow:#f5c400; --bg:#16161a; --card:#222228; --text:#eee; --muted:#888; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+         background:var(--bg); color:var(--text);
+         font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+  .card { width:min(92vw,360px); background:var(--card); border-radius:20px; padding:28px; text-align:center; }
+  h1 { margin:0 0 4px; font-size:22px; }
+  #status { color:var(--muted); font-size:14px; min-height:20px; margin-bottom:24px; }
+  .bulb { width:110px; height:110px; margin:0 auto 24px; border-radius:50%;
+          background:#3a3520; transition:background .2s, box-shadow .2s; }
+  button { width:100%; padding:14px; font-size:17px; border:0; border-radius:12px; cursor:pointer;
+           margin-bottom:14px; font-weight:600; }
+  #connectBtn { background:#3b82f6; color:#fff; }
+  #toggleBtn { background:var(--yellow); color:#222; }
+  button:disabled { opacity:.35; cursor:default; }
+  label { display:block; text-align:left; font-size:14px; color:var(--muted); margin:8px 0; }
+  input[type=range] { width:100%; accent-color:var(--yellow); height:32px; }
+  .warn { color:#f59e0b; font-size:13px; margin-top:16px; line-height:1.4; display:none; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>ESP32 LED</h1>
+  <div id="status">Not connected</div>
+  <div class="bulb" id="bulb"></div>
+
+  <button id="connectBtn">Connect</button>
+  <button id="toggleBtn" disabled>Turn ON</button>
+
+  <label for="slider">Brightness: <span id="pct">0</span>%</label>
+  <input type="range" id="slider" min="0" max="255" value="0" disabled>
+
+  <div class="warn" id="warn">
+    This browser has no Web Bluetooth.<br>
+    Android: use Chrome. iPhone/iPad: open this page in the free <b>Bluefy</b> app.
+  </div>
+</div>
+
+<script>
+const SERVICE_UUID  = "6e400010-b5a3-f393-e0a9-e50e24dcca9e";
+const LED_CHAR_UUID = "6e400011-b5a3-f393-e0a9-e50e24dcca9e";
+
+const $ = id => document.getElementById(id);
+let device = null, ledChar = null, level = 0, lastOn = 255;
+let sending = false, pending = null;
+
+if (!navigator.bluetooth) {
+  $("warn").style.display = "block";
+  $("connectBtn").disabled = true;
+}
+
+function render(v) {
+  level = v;
+  if (v > 0) lastOn = v;
+  $("slider").value = v;
+  $("pct").textContent = Math.round(v / 255 * 100);
+  $("toggleBtn").textContent = v > 0 ? "Turn OFF" : "Turn ON";
+  const a = v / 255;
+  $("bulb").style.background = v ? `rgba(245,196,0,${0.25 + 0.75 * a})` : "#3a3520";
+  $("bulb").style.boxShadow  = v ? `0 0 ${20 + 60 * a}px rgba(245,196,0,${a})` : "none";
+}
+
+function setControls(on) {
+  $("toggleBtn").disabled = !on;
+  $("slider").disabled = !on;
+  $("connectBtn").textContent = on ? "Disconnect" : "Connect";
+}
+
+// Send one byte; coalesce rapid slider moves so BLE isn't flooded
+async function send(v) {
+  render(v);
+  if (!ledChar) return;
+  if (sending) { pending = v; return; }
+  sending = true;
+  try { await ledChar.writeValue(new Uint8Array([v])); }
+  catch (e) { $("status").textContent = "Write failed: " + e.message; }
+  sending = false;
+  if (pending !== null) { const p = pending; pending = null; send(p); }
+}
+
+async function connect() {
+  try {
+    $("status").textContent = "Searching…";
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [SERVICE_UUID] }],
+    });
+    device.addEventListener("gattserverdisconnected", onDisconnected);
+    $("status").textContent = "Connecting…";
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(SERVICE_UUID);
+    ledChar = await service.getCharacteristic(LED_CHAR_UUID);
+
+    await ledChar.startNotifications();
+    ledChar.addEventListener("characteristicvaluechanged",
+      e => render(e.target.value.getUint8(0)));
+    render((await ledChar.readValue()).getUint8(0));
+
+    $("status").textContent = "Connected to " + (device.name || "ESP32");
+    setControls(true);
+  } catch (e) {
+    $("status").textContent = e.name === "NotFoundError" ? "No device selected" : "Error: " + e.message;
+  }
+}
+
+function onDisconnected() {
+  ledChar = null;
+  setControls(false);
+  $("status").textContent = "Disconnected";
+}
+
+$("connectBtn").onclick = () =>
+  device && device.gatt.connected ? device.gatt.disconnect() : connect();
+$("toggleBtn").onclick = () => send(level > 0 ? 0 : lastOn);
+$("slider").oninput = e => send(parseInt(e.target.value, 10));
+
+render(0);
+</script>
+</body>
+</html>
